@@ -1,0 +1,42 @@
+# Python 字节码和缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# 虚拟环境与本地配置
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 编辑器和系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.log
+
+# 常见本地截图与调试结果（不要提交屏幕隐私内容）
+/screenshot*.png
+/result*.html
+/screen-solver-result-*.html

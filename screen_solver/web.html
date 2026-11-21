@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>截图解答</title>
+  <link rel="stylesheet" href="/static/answer.css">
+  <style>
+    body { max-width: 760px; margin: 40px auto; padding: 0 20px; font: 16px/1.6 system-ui, sans-serif; color: #222; }
+    input, button { font: inherit; padding: 9px 12px; border: 1px solid #bbb; border-radius: 6px; }
+    input { width: min(100%, 360px); box-sizing: border-box; }
+    button { margin: 12px 0; color: white; background: #245fe5; border-color: #245fe5; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    #forget { background: white; color: #444; border-color: #bbb; }
+    summary { cursor: pointer; }
+    #status { color: #555; }
+  </style>
+</head>
+<body>
+  <h1>截图解答</h1>
+  <p>首次连接输入访问口令，以后点击按钮即可。截图会发送给 DeepSeek。</p>
+  <details id="access">
+    <summary id="access-label">访问口令</summary>
+    <p>口令保存在此浏览器中，请仅在可信设备上使用。</p>
+    <label for="token">主机终端显示的访问口令</label><br>
+    <input id="token" type="password" autocomplete="off" placeholder="输入访问口令">
+    <br><button id="forget" type="button">清除已保存的口令</button>
+  </details>
+  <button id="solve" type="button">截屏并解答</button>
+  <p id="status" role="status" aria-live="polite"></p>
+  <h2>答案</h2>
+  <div id="answer" class="markdown-answer"></div>
+  <script src="/static/marked.umd.js"></script>
+  <script src="/static/purify.min.js"></script>
+  <script src="/static/render.js"></script>
+  <script>
+    const button = document.getElementById('solve');
+    const status = document.getElementById('status');
+    const answer = document.getElementById('answer');
+    const access = document.getElementById('access');
+    const label = document.getElementById('access-label');
+    const tokenInput = document.getElementById('token');
+    const storageKey = 'screen-solver-token';
+
+    function getSavedToken() {
+      try { return localStorage.getItem(storageKey) || ''; } catch { return ''; }
+    }
+    function saveToken(token) {
+      try { localStorage.setItem(storageKey, token); return true; } catch { return false; }
+    }
+    function forgetToken() {
+      try { localStorage.removeItem(storageKey); } catch { /* 存储不可用 */ }
+      label.textContent = '访问口令（尚未保存）';
+      access.open = true;
+    }
+
+    tokenInput.value = getSavedToken();
+    if (tokenInput.value) {
+      label.textContent = '已记住访问口令（点击管理）';
+    } else {
+      forgetToken();
+    }
+    document.getElementById('forget').addEventListener('click', () => {
+      forgetToken();
+      tokenInput.value = '';
+      status.textContent = '已清除本浏览器中保存的口令。';
+    });
+
+    button.addEventListener('click', async () => {
+      const token = tokenInput.value.trim();
+      if (!token) { access.open = true; status.textContent = '请先输入访问口令。'; return; }
+      button.disabled = true;
+      status.textContent = '正在处理，请稍候……';
+      answer.textContent = '';
+      try {
+        const response = await fetch('/api/solve', {method: 'POST', headers: {'X-Access-Token': token}});
+        const result = await response.json();
+        if (response.status === 401) {
+          forgetToken();
+        } else if ([200, 409, 500, 502].includes(response.status)) {
+          // 这些响应说明口令已通过校验，即使后续模型调用失败也可以记住。
+          if (saveToken(token)) {
+            label.textContent = '已记住访问口令（点击管理）';
+            access.open = false;
+          } else {
+            label.textContent = '浏览器无法保存口令';
+          }
+        }
+        if (!response.ok) throw new Error(result.error || '请求失败');
+        status.textContent = result.demo ? '演示完成（未截屏、未调用模型）。' : '解答完成。';
+        renderMarkdown(answer, result.answer);
+      } catch (error) {
+        status.textContent = '出错：' + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+/* Markdown 答案样式，局域网页面和本机结果页共用。 */
+.markdown-answer { overflow-wrap: anywhere; padding: 16px; background: #f5f6f8; border-radius: 8px; min-height: 100px; }
+.markdown-answer > :first-child { margin-top: 0; }
+.markdown-answer > :last-child { margin-bottom: 0; }
+.markdown-answer pre { padding: 12px; overflow-x: auto; background: #e8eaf0; border-radius: 6px; }
+.markdown-answer code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.markdown-answer :not(pre) > code { padding: 2px 4px; background: #e8eaf0; border-radius: 3px; }
+.markdown-answer blockquote { margin-left: 0; padding-left: 12px; border-left: 4px solid #aaa; color: #555; }
+.markdown-answer table { border-collapse: collapse; display: block; overflow-x: auto; }
+.markdown-answer th, .markdown-answer td { padding: 6px 10px; border: 1px solid #ccc; }
