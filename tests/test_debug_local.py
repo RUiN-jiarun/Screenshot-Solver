@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import debug_local
 from screen_solver.capture import CaptureError
@@ -14,17 +14,25 @@ from screen_solver.deepseek import DeepSeekError
 class LocalDebugTests(unittest.TestCase):
     def test_full_flow(self):
         output = io.StringIO()
+        viewer = MagicMock()
+        viewer.url = 'http://127.0.0.1:1/test'
+        viewer.open.return_value = True
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}), \
              patch("debug_local.time.sleep") as sleep, \
              patch("debug_local.capture_screen", return_value=b"screenshot") as capture, \
-             patch("debug_local.solve_image", return_value="模型答案") as solve, \
-             patch("debug_local.show_result", return_value=(Path("/tmp/result.html"), True)) as show, \
+             patch("debug_local.stream_image", return_value=iter(["模型", "答案"])) as solve, \
+             patch("debug_local.LiveResult") as live, \
+             patch("debug_local.write_result", return_value=Path("/tmp/result.html")) as save, \
              contextlib.redirect_stdout(output):
+            live.return_value.__enter__.return_value = viewer
             self.assertEqual(debug_local.main([]), 0)
         sleep.assert_called_once_with(5)
         capture.assert_called_once_with()
         solve.assert_called_once_with(b"screenshot", "test-key")
-        show.assert_called_once_with("模型答案", None)
+        self.assertEqual(viewer.append.call_count, 2)
+        viewer.finish.assert_called_once_with()
+        viewer.wait_for_viewer.assert_called_once_with()
+        save.assert_called_once_with("模型答案", None)
         self.assertIn("模型答案", output.getvalue())
         self.assertIn("/tmp/result.html", output.getvalue())
 
@@ -35,11 +43,13 @@ class LocalDebugTests(unittest.TestCase):
                  patch("debug_local.time.sleep"), \
                  patch("debug_local.capture_screen", return_value=b"screenshot"), \
                  patch("debug_local.getpass.getpass") as getpass, \
-                 patch("debug_local.solve_image") as solve, \
+                 patch("debug_local.stream_image") as solve, \
+                 patch("debug_local.LiveResult") as live, \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(debug_local.main(["--delay", "0", "--capture-only", "--save", str(path)]), 0)
             getpass.assert_not_called()
             solve.assert_not_called()
+            live.assert_not_called()
             self.assertEqual(path.read_bytes(), b"screenshot")
             if os.name == "posix":
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
@@ -61,7 +71,8 @@ class LocalDebugTests(unittest.TestCase):
                  patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}), \
                  patch("debug_local.time.sleep"), \
                  patch("debug_local.capture_screen", **capture), \
-                 patch("debug_local.solve_image", side_effect=model_effect), \
+                 patch("debug_local.stream_image", side_effect=model_effect), \
+                 patch("debug_local.LiveResult"), \
                  contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(debug_local.main([]), 1)
 

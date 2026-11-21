@@ -8,8 +8,9 @@ import sys
 import time
 
 from screen_solver.capture import CaptureError, capture_screen
-from screen_solver.deepseek import DeepSeekError, solve_image
-from screen_solver.results import show_result
+from screen_solver.deepseek import DeepSeekError, stream_image
+from screen_solver.local_view import LiveResult
+from screen_solver.results import write_result
 
 
 def non_negative_seconds(value):
@@ -57,13 +58,29 @@ def main(argv=None):
             print("仅截图模式：未调用 DeepSeek。")
             return 0
 
-        print("正在将截图发送给 DeepSeek，请稍候……", flush=True)
-        answer = solve_image(image, api_key)
-        print(f"\n--- 模型答案 ---\n{answer}")
-        path, opened = show_result(answer, args.html)
-        print(f"\nHTML 结果已保存至：{path}")
-        if not opened:
-            print("未能自动打开浏览器，请手动打开上面的文件。")
+        # 截屏完成后打开本机实时页面，避免把页面自身截进去。
+        with LiveResult() as view:
+            opened = view.open()
+            print(f"实时页面：{view.url}", flush=True)
+            if not opened:
+                print("未能自动打开浏览器，可在生成期间手动打开上面的地址。", flush=True)
+            print("正在将截图发送给 DeepSeek，请稍候……\n\n--- 模型答案 ---", flush=True)
+            chunks = []
+            try:
+                for chunk in stream_image(image, api_key):
+                    chunks.append(chunk)
+                    view.append(chunk)
+                    print(chunk, end="", flush=True)
+                path = write_result("".join(chunks), args.html)
+                print(f"\n\nHTML 结果已保存至：{path}", flush=True)
+                view.finish()
+            except (CaptureError, DeepSeekError, OSError, ValueError, KeyboardInterrupt) as exc:
+                view.finish("已取消。" if isinstance(exc, KeyboardInterrupt) else str(exc))
+                if opened:
+                    view.wait_for_viewer()
+                raise
+            if opened:
+                view.wait_for_viewer()
         return 0
     except (CaptureError, DeepSeekError, OSError, ValueError) as exc:
         print(f"出错：{exc}", file=sys.stderr)

@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from .capture import CaptureError, capture_screen
-from .deepseek import DeepSeekError, solve_image
+from .deepseek import DeepSeekError, stream_image
 
 PAGE = Path(__file__).with_name("web.html").read_bytes()
 STATIC = Path(__file__).with_name("static")
@@ -34,8 +34,9 @@ class SolverServer(ThreadingHTTPServer):
 
     def solve(self):
         if self.demo:
-            return "【演示模式】连接成功！这是模拟答案，没有截屏，也没有调用 DeepSeek。"
-        return solve_image(capture_screen(), self.api_key)
+            yield "【演示模式】连接成功！这是模拟答案，没有截屏，也没有调用 DeepSeek。"
+        else:
+            yield from stream_image(capture_screen(), self.api_key)
 
 
 class SolverHandler(BaseHTTPRequestHandler):
@@ -66,7 +67,7 @@ class SolverHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        if self.path != "/api/solve":
+        if self.path not in ("/api/solve", "/api/solve-stream"):
             self.send_error(404)
             return
         # 非浏览器客户端不一定有 Origin；浏览器跨站请求必须拒绝。
@@ -84,13 +85,49 @@ class SolverHandler(BaseHTTPRequestHandler):
         if not self.server.busy.acquire(blocking=False):
             self.send_json(409, {"error": "正在处理上一条请求，请稍后再试。"})
             return
+        # 旧版网页会将 /api/solve 的响应整体解析为 JSON，保留该接口。
+        if self.path == "/api/solve":
+            try:
+                try:
+                    answer = "".join(self.server.solve())
+                except (CaptureError, DeepSeekError) as exc:
+                    self.send_json(502, {"error": str(exc)})
+                except Exception:
+                    self.send_json(500, {"error": "服务发生意外错误，请检查服务端状态。"})
+                else:
+                    self.send_json(200, {"answer": answer, "demo": self.server.demo})
+            finally:
+                self.server.busy.release()
+            return
+
+        # HTTP/1.0 以连接关闭表示流结束，逐条刷新 NDJSON 给浏览器。
         try:
-            answer = self.server.solve()
-            self.send_json(200, {"answer": answer, "demo": self.server.demo})
-        except (CaptureError, DeepSeekError) as exc:
-            self.send_json(502, {"error": str(exc)})
-        except Exception:
-            self.send_json(500, {"error": "服务发生意外错误，请检查服务端状态。"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+
+            def emit(event):
+                line = json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n"
+                self.wfile.write(line)
+                self.wfile.flush()
+
+            emit({"type": "start", "demo": self.server.demo})
+            try:
+                for chunk in self.server.solve():
+                    emit({"type": "delta", "text": chunk})
+                emit({"type": "done"})
+            except (CaptureError, DeepSeekError) as exc:
+                emit({"type": "error", "error": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception:
+                emit({"type": "error", "error": "服务发生意外错误，请检查服务端状态。"})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         finally:
             self.server.busy.release()
 

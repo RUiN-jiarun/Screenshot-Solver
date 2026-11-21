@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from unittest.mock import patch
 
-from screen_solver.deepseek import DeepSeekError, solve_image
+from screen_solver.deepseek import DeepSeekError, stream_image
 from screen_solver.server import SolverServer, load_or_create_token
 
 
@@ -18,27 +18,59 @@ class Response(io.BytesIO):
     pass
 
 
+def sse_chunk(data):
+    return ("data: " + json.dumps(data, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
 class DeepSeekTests(unittest.TestCase):
-    def test_request_contains_image_and_extracts_answer(self):
-        response = {"choices": [{"message": {"content": " 答案是 42。 "}}]}
-        with patch("urllib.request.urlopen", return_value=Response(json.dumps(response).encode())) as call:
-            self.assertEqual(solve_image(b"fake png", "test-key"), "答案是 42。")
+    def test_request_streams_only_final_answer(self):
+        events = (b": keepalive\n\n"
+                  + sse_chunk({"choices": [{"delta": {"reasoning_content": "隐藏思考"}}]})
+                  + sse_chunk({"choices": [{"delta": {"content": " 答案"}}]})
+                  + sse_chunk({"choices": [{"delta": {"content": "是 42。 "}, "finish_reason": "stop"}]})
+                  + b"data: [DONE]\n\n")
+        with patch("urllib.request.urlopen", return_value=Response(events)) as call:
+            self.assertEqual(list(stream_image(b"fake png", "test-key")), [" 答案", "是 42。 "])
         request = call.call_args.args[0]
         data = json.loads(request.data)
         self.assertEqual(request.full_url, "https://api.deepseek.com/chat/completions")
         self.assertEqual(request.get_header("Authorization"), "Bearer test-key")
         self.assertEqual(data["model"], "deepseek-flash")
+        self.assertTrue(data["stream"])
+        self.assertNotIn("thinking", data)
+        self.assertNotIn("reasoning_effort", data)
+        prompt = data["messages"][0]["content"][0]["text"]
+        for kind in ("选择题", "申论题", "案例分析题", "阅读理解"):
+            self.assertIn(kind, prompt)
         url = data["messages"][0]["content"][1]["image_url"]["url"]
         self.assertEqual(base64.b64decode(url.split(",", 1)[1]), b"fake png")
 
     def test_http_error_and_empty_response(self):
         error = urllib.error.HTTPError("https://api.deepseek.com", 401, "invalid", {}, None)
         with patch("urllib.request.urlopen", side_effect=error), self.assertRaisesRegex(DeepSeekError, "API Key"):
-            solve_image(b"png", "bad-key")
-        error.close()
-        with patch("urllib.request.urlopen", return_value=Response(b'{"choices":[]}')):
-            with self.assertRaisesRegex(DeepSeekError, "没有答案"):
-                solve_image(b"png", "test-key")
+            list(stream_image(b"png", "bad-key"))
+        with patch("urllib.request.urlopen", return_value=Response(b'data: [DONE]\n\n')):
+            with self.assertRaisesRegex(DeepSeekError, "没有返回文字"):
+                list(stream_image(b"png", "test-key"))
+
+    def test_partial_stream_is_not_silently_successful(self):
+        cases = [
+            (sse_chunk({"choices": [{"delta": {"content": "部分"}}]}), "中断"),
+            (sse_chunk({"choices": [{"delta": {"content": "部分"}, "finish_reason": "length"}]}) + b'data: [DONE]\n\n', "长度限制"),
+            (sse_chunk({"choices": [{"delta": {"content": "部分"}, "finish_reason": "aborted"}]}) + b'data: [DONE]\n\n', "中断"),
+            (sse_chunk({"choices": [{"delta": {}, "finish_reason": "content_filter"}]}) + b'data: [DONE]\n\n', "内容过滤"),
+            (b'data: invalid json\n\n', "无法解析"),
+        ]
+        for response, message in cases:
+            with self.subTest(message=message), patch("urllib.request.urlopen", return_value=Response(response)):
+                with self.assertRaisesRegex(DeepSeekError, message):
+                    list(stream_image(b"png", "test-key"))
+
+    def test_multiline_sse_data(self):
+        events = (b'data: {"choices":\n' + b'data: [{"delta":{"content":"ok"}}]}\n\n'
+                  + b'data: [DONE]\n\n')
+        with patch("urllib.request.urlopen", return_value=Response(events)):
+            self.assertEqual(list(stream_image(b"png", "test-key")), ["ok"])
 
 
 class TokenTests(unittest.TestCase):
@@ -77,13 +109,15 @@ class ServerTests(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join()
 
-    def post(self, token, origin=None):
+    def post(self, token, origin=None, path="/api/solve-stream"):
         headers = {"X-Access-Token": token}
         if origin:
             headers["Origin"] = origin
-        request = urllib.request.Request(self.url + "/api/solve", headers=headers, method="POST")
+        request = urllib.request.Request(self.url + path, headers=headers, method="POST")
         try:
             with self.opener.open(request, timeout=5) as response:
+                if response.headers.get_content_type() == "application/x-ndjson":
+                    return response.status, [json.loads(line) for line in response if line.strip()]
                 return response.status, json.load(response)
         except urllib.error.HTTPError as exc:
             with exc:
@@ -92,10 +126,25 @@ class ServerTests(unittest.TestCase):
     def test_page_and_demo_flow(self):
         with self.opener.open(self.url + "/") as response:
             self.assertIn("截屏并解答", response.read().decode())
-        status, data = self.post("test-token", self.url)
+        status, events = self.post("test-token", self.url)
         self.assertEqual(status, 200)
-        self.assertTrue(data["demo"])
-        self.assertIn("没有截屏", data["answer"])
+        self.assertTrue(events[0]["demo"])
+        self.assertIn("没有截屏", events[1]["text"])
+        self.assertEqual(events[-1]["type"], "done")
+
+    def test_legacy_page_still_receives_one_json_object(self):
+        status, result = self.post("test-token", path="/api/solve")
+        self.assertEqual(status, 200)
+        self.assertTrue(result["demo"])
+        self.assertIn("没有截屏", result["answer"])
+
+    def test_legacy_errors_still_return_json(self):
+        def failing():
+            yield "部分答案"
+            raise DeepSeekError("模拟故障")
+        with patch.object(self.server, "solve", side_effect=failing):
+            self.assertEqual(self.post("test-token", path="/api/solve"), (502, {"error": "模拟故障"}))
+        self.assertEqual(self.post("test-token")[0], 200)
 
     def test_markdown_assets_are_served(self):
         for name in ("answer.css", "marked.umd.js", "purify.min.js", "render.js"):
@@ -119,11 +168,12 @@ class ServerTests(unittest.TestCase):
         self.server.api_key = "test-key"
         try:
             with patch("screen_solver.server.capture_screen", return_value=b"screenshot") as capture, \
-                 patch("screen_solver.server.solve_image", return_value="模型答案") as solve:
-                status, data = self.post("test-token")
+                 patch("screen_solver.server.stream_image", return_value=iter(["模型", "答案"])) as solve:
+                status, events = self.post("test-token")
                 self.assertEqual(status, 200)
-                self.assertEqual(data["answer"], "模型答案")
-                self.assertFalse(data["demo"])
+                self.assertFalse(events[0]["demo"])
+                self.assertEqual([e["text"] for e in events if e["type"] == "delta"], ["模型", "答案"])
+                self.assertEqual(events[-1]["type"], "done")
                 capture.assert_called_once_with()
                 solve.assert_called_once_with(b"screenshot", "test-key")
         finally:
@@ -131,9 +181,36 @@ class ServerTests(unittest.TestCase):
             self.server.api_key = ""
 
     def test_error_is_reported_and_lock_released(self):
-        with patch.object(self.server, "solve", side_effect=DeepSeekError("模拟故障")):
-            self.assertEqual(self.post("test-token"), (502, {"error": "模拟故障"}))
+        def failing():
+            yield "部分答案"
+            raise DeepSeekError("模拟故障")
+        with patch.object(self.server, "solve", side_effect=failing):
+            status, events = self.post("test-token")
+            self.assertEqual(status, 200)
+            self.assertEqual(events[-1], {"type": "error", "error": "模拟故障"})
+            self.assertEqual(events[1]["text"], "部分答案")
         self.assertEqual(self.post("test-token")[0], 200)
+
+    def test_first_chunk_arrives_before_completion(self):
+        release = threading.Event()
+        def slow_answer():
+            yield "第一段"
+            if not release.wait(5):
+                raise DeepSeekError("测试超时")
+            yield "第二段"
+        request = urllib.request.Request(self.url + "/api/solve-stream", headers={"X-Access-Token": "test-token"}, method="POST")
+        try:
+            with patch.object(self.server, "solve", side_effect=slow_answer):
+                with self.opener.open(request, timeout=5) as response:
+                    self.assertEqual(json.loads(response.readline())["type"], "start")
+                    self.assertEqual(json.loads(response.readline())["text"], "第一段")
+                    self.assertEqual(self.post("test-token")[0], 409)
+                    release.set()
+                    self.assertEqual(json.loads(response.readline())["text"], "第二段")
+                    self.assertEqual(json.loads(response.readline())["type"], "done")
+        finally:
+            release.set()
+
 
 
 if __name__ == "__main__":

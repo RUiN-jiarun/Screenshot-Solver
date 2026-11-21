@@ -38,8 +38,8 @@ renderMarkdown(document.getElementById('answer'), text);
 </body></html>'''
 
 
-def show_result(answer, path=None):
-    """写入私有 HTML 文件并尝试打开；返回文件路径与打开状态。"""
+def write_result(answer, path=None):
+    """将答案写入独立的私有 HTML 文件。"""
     content = result_html(answer)
     if path is None:
         fd, name = tempfile.mkstemp(prefix="screen-solver-result-", suffix=".html")
@@ -49,6 +49,12 @@ def show_result(answer, path=None):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as file:
         file.write(content)
+    return path
+
+
+def show_result(answer, path=None):
+    """写入 HTML 文件并尝试打开；保留给需要静态结果的调用方。"""
+    path = write_result(answer, path)
     try:
         opened = webbrowser.open(path.as_uri())
     except (webbrowser.Error, OSError):

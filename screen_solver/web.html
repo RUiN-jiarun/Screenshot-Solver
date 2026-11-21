@@ -70,15 +70,24 @@
       const token = tokenInput.value.trim();
       if (!token) { access.open = true; status.textContent = '请先输入访问口令。'; return; }
       button.disabled = true;
-      status.textContent = '正在处理，请稍候……';
+      status.textContent = '正在截屏和思考，答案生成后会实时显示……';
       answer.textContent = '';
+      let text = '';
+      let renderScheduled = false;
+      function scheduleRender() {
+        if (!renderScheduled) {
+          renderScheduled = true;
+          requestAnimationFrame(() => {
+            renderScheduled = false;
+            renderMarkdown(answer, text);
+          });
+        }
+      }
       try {
-        const response = await fetch('/api/solve', {method: 'POST', headers: {'X-Access-Token': token}});
-        const result = await response.json();
+        const response = await fetch('/api/solve-stream', {method: 'POST', headers: {'X-Access-Token': token}});
         if (response.status === 401) {
           forgetToken();
         } else if ([200, 409, 500, 502].includes(response.status)) {
-          // 这些响应说明口令已通过校验，即使后续模型调用失败也可以记住。
           if (saveToken(token)) {
             label.textContent = '已记住访问口令（点击管理）';
             access.open = false;
@@ -86,9 +95,49 @@
             label.textContent = '浏览器无法保存口令';
           }
         }
-        if (!response.ok) throw new Error(result.error || '请求失败');
-        status.textContent = result.demo ? '演示完成（未截屏、未调用模型）。' : '解答完成。';
-        renderMarkdown(answer, result.answer);
+        if (!response.ok) {
+          if (response.status === 404) throw new Error('网页与服务版本不一致，请重启服务并刷新网页。');
+          let message = `请求失败（HTTP ${response.status}）`;
+          if ((response.headers.get('content-type') || '').startsWith('application/json')) {
+            try { message = (await response.json()).error || message; } catch { /* 使用默认提示 */ }
+          }
+          throw new Error(message);
+        }
+        if (!(response.headers.get('content-type') || '').startsWith('application/x-ndjson')) {
+          throw new Error('响应格式与网页不匹配，请重启服务并刷新网页。');
+        }
+        if (!response.body) throw new Error('浏览器不支持流式读取。');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let pending = '';
+        let completed = false;
+        let demo = false;
+        function handleLine(line) {
+          if (!line) return;
+          let event;
+          try { event = JSON.parse(line); }
+          catch { throw new Error('流式数据格式异常，请刷新网页后重试。'); }
+          if (event.type === 'start') demo = event.demo;
+          if (event.type === 'delta') {
+            text += event.text;
+            status.textContent = '正在生成答案……';
+            scheduleRender();
+          }
+          if (event.type === 'error') throw new Error(event.error || '请求失败');
+          if (event.type === 'done') completed = true;
+        }
+        while (true) {
+          const {value, done} = await reader.read();
+          pending += decoder.decode(value, {stream: !done});
+          const lines = pending.split('\n');
+          pending = lines.pop();
+          for (const line of lines) handleLine(line);
+          if (done) break;
+        }
+        if (pending) handleLine(pending);
+        if (!completed) throw new Error('连接中断，答案可能不完整。');
+        renderMarkdown(answer, text);
+        status.textContent = demo ? '演示完成（未截屏、未调用模型）。' : '解答完成。';
       } catch (error) {
         status.textContent = '出错：' + error.message;
       } finally {

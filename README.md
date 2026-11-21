@@ -16,9 +16,9 @@
 python3 main.py --host 0.0.0.0
 ```
 
-让辅助设备连接同一局域网，在浏览器打开 `http://<主电脑局域网IP>:8765/`。首次输入终端显示的**访问口令**，以后用同一浏览器和地址访问时，直接点击「截屏并解答」即可。macOS 可通过 `ipconfig getifaddr en0` 查看 IP。
+让辅助设备连接同一局域网，在浏览器打开 `http://<主电脑局域网IP>:8765/`。首次输入终端显示的**访问口令**，以后用同一浏览器和地址访问时，直接点击「截屏并解答」即可。答案会流式显示；模型思考阶段不会显示答案，请耐心等待。macOS 可通过 `ipconfig getifaddr en0` 查看 IP。
 
-服务按 `Ctrl+C` 停止。访问口令保存在主电脑的 `~/.screen-solver/access-token`；未设置 `SCREEN_SOLVER_TOKEN` 时，停止服务并删除该文件，重启会生成新口令。也可通过该环境变量指定口令。
+服务按 `Ctrl+C` 停止。更新程序后请重启服务并刷新辅助设备网页，避免新旧版本不匹配。访问口令保存在主电脑的 `~/.screen-solver/access-token`；未设置 `SCREEN_SOLVER_TOKEN` 时，停止服务并删除该文件，重启会生成新口令。也可通过该环境变量指定口令。
 
 ## 本机调试
 
@@ -28,7 +28,7 @@ python3 main.py --host 0.0.0.0
 python3 debug_local.py
 ```
 
-运行后在 5 秒内切换到题目页面；脚本截取主屏幕并发送给 DeepSeek，答案显示在终端并自动打开 HTML 页面（支持 Markdown）。可用 `--delay 10` 调整等待时间，或用 `--html result.html` 指定结果文件。只想检查截图、不调用 API：
+运行后在 5 秒内切换到题目页面；脚本截取主屏幕并发送给 DeepSeek，答案在终端和自动打开的页面中流式显示（支持 Markdown）。完成后另存独立 HTML 文件，路径显示在终端；实时页面在脚本退出后不能刷新，可打开保存的文件查看。可用 `--delay 10` 调整等待时间，或用 `--html result.html` 指定结果文件。只想检查截图、不调用 API：
 
 ```bash
 python3 debug_local.py --capture-only --save screenshot.png
